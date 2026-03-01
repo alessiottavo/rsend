@@ -1,0 +1,10 @@
+[package]
+name = "rsend"
+version = "0.1.0"
+edition = "2026"
+license = "GPL-3.0"
+description = "The security conscious, CLI file-sharing tool. (placeholder)"
+repository = "https://github.com/alessiottavo/rsend.git"
+readme = "README.md"
+
+[dependencies]
