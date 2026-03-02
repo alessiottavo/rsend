@@ -8,3 +8,11 @@ repository = "https://github.com/alessiottavo/rsend.git"
 readme = "README.md"
 
 [dependencies]
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+pedantic = "warn"
+unwrap_used = "deny"
+expect_used = "deny"
