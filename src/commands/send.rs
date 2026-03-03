@@ -1,9 +1,21 @@
+use crate::pairing::{alias, code::PairingCode};
 use std::path::PathBuf;
 
 pub fn run(args: &[String]) {
     match validate_args(args) {
         Ok(send_path) => {
-            // proceed
+            let sender_alias = alias::generate();
+            let pairing_code = match PairingCode::generate() {
+                Ok(code) => code,
+                Err(e) => {
+                    eprintln!("error: {}", e);
+                    std::process::exit(1);
+                }
+            };
+
+            println!("your alias:   {}", sender_alias);
+            println!("pairing code: {}", pairing_code.value);
+            println!("waiting to pair...");
         }
         Err(e) => {
             eprintln!("error: {}", e);

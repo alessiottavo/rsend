@@ -8,6 +8,8 @@ repository = "https://github.com/alessiottavo/rsend.git"
 readme = "README.md"
 
 [dependencies]
+getrandom = "0.4.2"
+rand = "0.10.0"
 
 [lints.rust]
 unsafe_code = "forbid"
