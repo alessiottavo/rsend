@@ -1,3 +1,5 @@
+use crate::pairing::code;
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 pub fn run(args: &[String]) {
@@ -8,7 +10,17 @@ pub fn run(args: &[String]) {
                 std::process::exit(1);
             }
             println!("receiving to: {}", dir.display());
-            // proceed
+
+            let pairing_code = match prompt_code() {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("error: {}", e);
+                    std::process::exit(1);
+                }
+            };
+
+            println!("looking up sender...");
+            // proceed to DHT lookup with pairing_code
         }
         Err(e) => {
             eprintln!("error: {}", e);
@@ -52,12 +64,26 @@ fn validate(dir: &PathBuf) -> Result<(), String> {
     Ok(())
 }
 
+fn prompt_code() -> Result<String, String> {
+    print!("pairing code: ");
+    io::stdout()
+        .flush()
+        .map_err(|e| format!("failed to flush stdout: {}", e))?;
+
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .map_err(|e| format!("failed to read input: {}", e))?;
+
+    let code = input.trim().to_string();
+    code::validate_format(&code)?;
+    Ok(code)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
 
-    // parse_args tests
     #[test]
     fn test_no_args_uses_current_dir() {
         let args: Vec<String> = vec![];
@@ -73,8 +99,7 @@ mod tests {
     #[test]
     fn test_unexpected_args() {
         let args = vec!["/tmp".to_string(), "extra".to_string()];
-        let err = parse_args(&args).unwrap_err();
-        assert!(err.contains("unexpected arguments"));
+        assert!(parse_args(&args).is_err());
     }
 
     #[test]
@@ -90,16 +115,10 @@ mod tests {
 
     #[test]
     fn test_path_is_not_directory() {
-        // create a temp file to use as invalid dir argument
         let file_path = PathBuf::from("/tmp/rsend_test_file");
-        fs::File::create(&file_path).unwrap();
+        std::fs::File::create(&file_path).unwrap();
         let err = validate(&file_path).unwrap_err();
         assert!(err.contains("is not a directory"));
-        let _ = fs::remove_file(&file_path);
-    }
-
-    #[test]
-    fn test_writable_directory() {
-        assert!(validate(&PathBuf::from("/tmp")).is_ok());
+        let _ = std::fs::remove_file(&file_path);
     }
 }

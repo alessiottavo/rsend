@@ -33,9 +33,57 @@ impl PairingCode {
     }
 }
 
+pub fn validate_format(code: &str) -> Result<(), String> {
+    if code.len() != CODE_LENGTH {
+        return Err(format!(
+            "invalid code: must be {} characters long",
+            CODE_LENGTH
+        ));
+    }
+    if !code.chars().all(|c| CODE_CHARSET.contains(&(c as u8))) {
+        return Err("invalid code: must contain only lowercase letters and digits".to_string());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_valid_code_format() {
+        assert!(validate_format("ab3def12").is_ok());
+    }
+
+    #[test]
+    fn test_code_too_short() {
+        let err = validate_format("abc").unwrap_err();
+        assert!(err.contains("must be"));
+    }
+
+    #[test]
+    fn test_code_too_long() {
+        let err = validate_format("abc123abc123").unwrap_err();
+        assert!(err.contains("must be"));
+    }
+
+    #[test]
+    fn test_code_invalid_chars() {
+        let err = validate_format("abc!@#$%").unwrap_err();
+        assert!(err.contains("only lowercase"));
+    }
+
+    #[test]
+    fn test_code_uppercase_rejected() {
+        let err = validate_format("ABC12345").unwrap_err();
+        assert!(err.contains("only lowercase"));
+    }
+
+    #[test]
+    fn test_code_with_spaces_rejected() {
+        let err = validate_format("abc 1234").unwrap_err();
+        assert!(err.contains("only lowercase"));
+    }
 
     #[test]
     fn test_code_length() {
