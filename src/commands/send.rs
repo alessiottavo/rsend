@@ -1,8 +1,15 @@
 use crate::crypto::hash;
 use crate::pairing::{alias, code::PairingCode};
+use crate::protocol::{self, FileInfo};
 use crate::transfer;
-use crate::transport::{dht, quic::QuicListener};
+use crate::transport::{dht, nat, quic::QuicListener};
 use std::path::PathBuf;
+use std::time::Duration;
+
+const HOLE_PUNCH_PACKETS: u32 = 10;
+const HOLE_PUNCH_INTERVAL: Duration = Duration::from_millis(50);
+const RECEIVER_LOOKUP_ATTEMPTS: u32 = 60;
+const RECEIVER_LOOKUP_DELAY: Duration = Duration::from_secs(2);
 
 pub async fn run(args: &[String]) {
     if let Err(e) = run_inner(args).await {
@@ -24,18 +31,89 @@ async fn run_inner(args: &[String]) -> Result<(), String> {
     println!("your alias:   {sender_alias}");
     println!("pairing code: {}", pairing_code.value);
 
-    let dht_key = hash::derive_dht_key(&pairing_code.value);
+    let sender_key = hash::derive_sender_key(&pairing_code.value);
+    let receiver_key = hash::derive_receiver_key(&pairing_code.value);
 
-    let listener = QuicListener::bind(0)?;
-    let port = listener.port()?;
+    // Bind UDP + STUN discovery
+    println!("discovering public address...");
+    let (udp, public_addr) = nat::bind_and_discover().await?;
+    println!("public address: {public_addr}");
 
-    dht::announce(&dht_key, port)?;
+    // Announce sender on DHT with STUN-discovered port
+    dht::announce(&sender_key, public_addr.port()).await?;
 
+    // Wait for receiver to announce
     println!("waiting to pair...");
+    let receiver_addr =
+        dht::lookup_with_retry(&receiver_key, RECEIVER_LOOKUP_ATTEMPTS, RECEIVER_LOOKUP_DELAY)
+            .await?;
 
+    // Hole-punch toward receiver
+    println!("punching through NAT...");
+    nat::punch_hole(&udp, receiver_addr, HOLE_PUNCH_PACKETS, HOLE_PUNCH_INTERVAL).await?;
+
+    // Convert tokio socket back to std, clone for background punching
+    let std_socket = udp
+        .into_std()
+        .map_err(|e| format!("convert to std socket: {e}"))?;
+    std_socket
+        .set_nonblocking(true)
+        .map_err(|e| format!("set nonblocking: {e}"))?;
+
+    let punch_clone = std_socket
+        .try_clone()
+        .map_err(|e| format!("clone socket for punch: {e}"))?;
+    let punch_task = nat::punch_background(punch_clone, receiver_addr)?;
+
+    let listener = QuicListener::from_socket(std_socket)?;
     let mut stream = listener.accept().await?;
-    let files = transfer::collect_files(&send_path)?;
-    transfer::send_files(&mut stream, files, |_| {}).await?;
+    punch_task.abort();
+
+    // Handshake: exchange aliases
+    protocol::send_alias(&mut stream.send, &sender_alias).await?;
+    let receiver_alias = protocol::recv_alias(&mut stream.recv).await?;
+    println!("receiver:     {receiver_alias}");
+
+    // Collect files and send manifest
+    let (base, files) = transfer::collect_files(&send_path)?;
+    let manifest: Vec<FileInfo> = files
+        .iter()
+        .map(|rel| {
+            let abs = base.join(rel);
+            let name = rel.to_string_lossy().to_string();
+            let size = abs
+                .metadata()
+                .map_err(|e| format!("stat {name}: {e}"))?
+                .len();
+            Ok(FileInfo { name, size })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    protocol::send_manifest(&mut stream.send, &manifest).await?;
+
+    // Wait for consent
+    println!("waiting for consent...");
+    let accepted = protocol::recv_consent(&mut stream.recv).await?;
+    if !accepted {
+        println!("receiver declined the transfer.");
+        return Ok(());
+    }
+
+    // Transfer files
+    transfer::send_files(&mut stream.send, &base, &files, |p| {
+        println!(
+            "  {} {}/{}",
+            p.filename,
+            protocol::format_size(p.bytes_done),
+            protocol::format_size(p.bytes_total),
+        );
+    })
+    .await?;
+
+    stream
+        .send
+        .finish()
+        .map_err(|e| format!("finish stream: {e}"))?;
 
     println!("done!");
     Ok(())

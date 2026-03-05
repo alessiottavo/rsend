@@ -1,6 +1,7 @@
 mod commands;
 mod crypto;
 mod pairing;
+mod protocol;
 mod transfer;
 mod transport;
 
