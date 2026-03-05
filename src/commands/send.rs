@@ -1,24 +1,25 @@
 use crate::pairing::{alias, code::PairingCode};
 use std::path::PathBuf;
 
-pub fn run(args: &[String]) {
+#[allow(clippy::unused_async)] // will contain awaits when sender flow is wired
+pub async fn run(args: &[String]) {
     match validate_args(args) {
-        Ok(send_path) => {
+        Ok(_send_path) => {
             let sender_alias = alias::generate();
             let pairing_code = match PairingCode::generate() {
                 Ok(code) => code,
                 Err(e) => {
-                    eprintln!("error: {}", e);
+                    eprintln!("error: {e}");
                     std::process::exit(1);
                 }
             };
 
-            println!("your alias:   {}", sender_alias);
+            println!("your alias:   {sender_alias}");
             println!("pairing code: {}", pairing_code.value);
             println!("waiting to pair...");
         }
         Err(e) => {
-            eprintln!("error: {}", e);
+            eprintln!("error: {e}");
             std::process::exit(1);
         }
     }
@@ -32,7 +33,7 @@ fn validate_args(args: &[String]) -> Result<PathBuf, String> {
         ));
     }
 
-    match args.get(0) {
+    match args.first() {
         Some(p) => Ok(PathBuf::from(p)),
         None => Err("no path provided\nusage: rsend send <path>".to_string()),
     }

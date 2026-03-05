@@ -1,20 +1,21 @@
 use crate::pairing::code;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-pub fn run(args: &[String]) {
+#[allow(clippy::unused_async)] // will contain awaits when receiver flow is wired
+pub async fn run(args: &[String]) {
     match parse_args(args) {
         Ok(dir) => {
             if let Err(e) = validate(&dir) {
-                eprintln!("error: {}", e);
+                eprintln!("error: {e}");
                 std::process::exit(1);
             }
             println!("receiving to: {}", dir.display());
 
-            let pairing_code = match prompt_code() {
+            let _pairing_code = match prompt_code() {
                 Ok(c) => c,
                 Err(e) => {
-                    eprintln!("error: {}", e);
+                    eprintln!("error: {e}");
                     std::process::exit(1);
                 }
             };
@@ -23,7 +24,7 @@ pub fn run(args: &[String]) {
             // proceed to DHT lookup with pairing_code
         }
         Err(e) => {
-            eprintln!("error: {}", e);
+            eprintln!("error: {e}");
             std::process::exit(1);
         }
     }
@@ -37,15 +38,15 @@ fn parse_args(args: &[String]) -> Result<PathBuf, String> {
         ));
     }
 
-    match args.get(0) {
+    match args.first() {
         Some(p) => Ok(PathBuf::from(p)),
         None => {
-            std::env::current_dir().map_err(|e| format!("failed to get current directory: {}", e))
+            std::env::current_dir().map_err(|e| format!("failed to get current directory: {e}"))
         }
     }
 }
 
-fn validate(dir: &PathBuf) -> Result<(), String> {
+fn validate(dir: &Path) -> Result<(), String> {
     if !dir.exists() {
         return Err(format!("'{}' does not exist", dir.display()));
     }
@@ -68,12 +69,12 @@ fn prompt_code() -> Result<String, String> {
     print!("pairing code: ");
     io::stdout()
         .flush()
-        .map_err(|e| format!("failed to flush stdout: {}", e))?;
+        .map_err(|e| format!("failed to flush stdout: {e}"))?;
 
     let mut input = String::new();
     io::stdin()
         .read_line(&mut input)
-        .map_err(|e| format!("failed to read input: {}", e))?;
+        .map_err(|e| format!("failed to read input: {e}"))?;
 
     let code = input.trim().to_string();
     code::validate_format(&code)?;
