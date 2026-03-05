@@ -3,18 +3,24 @@ name = "rsend"
 version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0"
-description = "The security conscious, CLI file-sharing tool. (placeholder)"
+description = "The security conscious, CLI file-sharing tool."
 repository = "https://github.com/alessiottavo/rsend.git"
 readme = "README.md"
 
 [dependencies]
 getrandom = "0.4.2"
 rand = "0.10.0"
+blake3 = { version = "1.8.3" ,features = ["zeroize"] }
+mainline = "6.1.1"
+quinn = "0.11.9"
+rcgen = "0.14.7"
+rustls = { version = "0.23.37", default-features = false, features = ["ring", "std"] }
+tokio = { version = "1.50.0", features = ["full"] }
 
 [lints.rust]
 unsafe_code = "forbid"
 
 [lints.clippy]
-pedantic = "warn"
+pedantic = { level = "warn", priority = -1 }
 unwrap_used = "deny"
 expect_used = "deny"
