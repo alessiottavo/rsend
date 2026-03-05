@@ -106,7 +106,7 @@ pub fn generate() -> String {
     let adj = ADJECTIVES[rng.random_range(0..ADJECTIVES.len())];
     let color = COLORS[rng.random_range(0..COLORS.len())];
     let animal = ANIMALS[rng.random_range(0..ANIMALS.len())];
-    format!("{}-{}-{}", adj, color, animal)
+    format!("{adj}-{color}-{animal}")
 }
 
 #[cfg(test)]

@@ -15,7 +15,7 @@ impl PairingCode {
     pub fn generate() -> Result<Self, String> {
         let mut bytes = [0u8; CODE_LENGTH];
         getrandom::fill(&mut bytes)
-            .map_err(|e| format!("failed to generate random bytes: {:?}", e))?;
+            .map_err(|e| format!("failed to generate random bytes: {e:?}"))?;
 
         let value = bytes
             .iter()
@@ -36,8 +36,7 @@ impl PairingCode {
 pub fn validate_format(code: &str) -> Result<(), String> {
     if code.len() != CODE_LENGTH {
         return Err(format!(
-            "invalid code: must be {} characters long",
-            CODE_LENGTH
+            "invalid code: must be {CODE_LENGTH} characters long"
         ));
     }
     if !code.chars().all(|c| CODE_CHARSET.contains(&(c as u8))) {
