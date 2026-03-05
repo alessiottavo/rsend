@@ -98,30 +98,53 @@ pub async fn connect(udp: UdpSocket, peer_addr: SocketAddr) -> Result<QuicStream
 
 /// Connect to a peer with multiple attempts, giving NAT hole-punch time to open mappings.
 ///
-/// Each attempt clones the socket (same local port, same NAT mapping) and runs
-/// `connect()` with the given per-attempt timeout. Returns on first success or
-/// the error from the final attempt.
+/// Creates a single QUIC endpoint and retries `endpoint.connect()` on failure.
+/// Reusing one endpoint avoids multiple endpoints competing for the same socket.
+/// Returns on first success or the error from the final attempt.
 pub async fn connect_with_retry(
-    udp: &UdpSocket,
+    udp: UdpSocket,
     peer_addr: SocketAddr,
     attempts: u32,
     per_attempt: Duration,
 ) -> Result<QuicStream, String> {
+    let client_config = make_client_config()?;
+
+    let mut endpoint = Endpoint::new(
+        EndpointConfig::default(),
+        None,
+        udp,
+        Arc::new(quinn::TokioRuntime),
+    )
+    .map_err(|e| format!("QUIC endpoint creation failed: {e}"))?;
+
+    endpoint.set_default_client_config(client_config);
+
     let mut last_err = String::from("no attempts made");
 
     for attempt in 1..=attempts {
-        let socket_clone = udp
-            .try_clone()
-            .map_err(|e| format!("clone socket for attempt {attempt}: {e}"))?;
-
         if attempt > 1 {
             eprintln!("retrying QUIC handshake (attempt {attempt}/{attempts})...");
         }
 
-        match tokio::time::timeout(per_attempt, connect(socket_clone, peer_addr)).await {
-            Ok(Ok(stream)) => return Ok(stream),
+        let connecting = endpoint
+            .connect(peer_addr, "peer")
+            .map_err(|e| format!("connect error: {e}"))?;
+
+        match tokio::time::timeout(per_attempt, connecting).await {
+            Ok(Ok(conn)) => {
+                let (send, recv) = conn
+                    .open_bi()
+                    .await
+                    .map_err(|e| format!("stream open failed: {e}"))?;
+
+                return Ok(QuicStream {
+                    send,
+                    recv,
+                    _endpoint: endpoint,
+                });
+            }
             Ok(Err(e)) => {
-                last_err = e;
+                last_err = format!("handshake failed: {e}");
                 eprintln!("attempt {attempt}/{attempts} failed: {last_err}");
             }
             Err(_) => {

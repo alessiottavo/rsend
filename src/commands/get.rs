@@ -11,6 +11,8 @@ const SENDER_LOOKUP_ATTEMPTS: u32 = 30;
 const SENDER_LOOKUP_DELAY: Duration = Duration::from_secs(2);
 const CONNECT_ATTEMPTS: u32 = 3;
 const CONNECT_PER_ATTEMPT: Duration = Duration::from_secs(15);
+const PUNCH_BURST: usize = 10;
+const PUNCH_SETTLE: Duration = Duration::from_secs(1);
 
 pub async fn run(args: &[String]) {
     if let Err(e) = run_inner(args).await {
@@ -50,7 +52,7 @@ async fn run_inner(args: &[String]) -> Result<(), String> {
     // Announce receiver on DHT so sender can find us
     dht::announce(&receiver_key, public_addr.port()).await?;
 
-    // Convert to std socket, start background punch concurrently with connect
+    // Convert to std socket, punch burst to open NAT, then connect with retries
     let std_socket = udp
         .into_std()
         .map_err(|e| format!("convert to std socket: {e}"))?;
@@ -62,12 +64,20 @@ async fn run_inner(args: &[String]) -> Result<(), String> {
         .try_clone()
         .map_err(|e| format!("clone socket for punch: {e}"))?;
 
+    // Immediate burst to create NAT mapping before QUIC handshake
     println!("punching through NAT...");
+    for _ in 0..PUNCH_BURST {
+        let _ = punch_clone.send_to(&[0u8], sender_addr);
+    }
+
     let punch_task = nat::punch_background(punch_clone, sender_addr)?;
+
+    // Let punches propagate and give sender time to start punching back
+    tokio::time::sleep(PUNCH_SETTLE).await;
 
     println!("connecting...");
     let mut stream =
-        quic::connect_with_retry(&std_socket, sender_addr, CONNECT_ATTEMPTS, CONNECT_PER_ATTEMPT)
+        quic::connect_with_retry(std_socket, sender_addr, CONNECT_ATTEMPTS, CONNECT_PER_ATTEMPT)
             .await?;
     punch_task.abort();
 

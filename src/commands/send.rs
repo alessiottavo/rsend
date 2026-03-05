@@ -9,6 +9,7 @@ use std::time::Duration;
 const RECEIVER_LOOKUP_ATTEMPTS: u32 = 60;
 const RECEIVER_LOOKUP_DELAY: Duration = Duration::from_secs(2);
 const ACCEPT_TIMEOUT: Duration = Duration::from_secs(60);
+const PUNCH_BURST: usize = 10;
 
 pub async fn run(args: &[String]) {
     if let Err(e) = run_inner(args).await {
@@ -65,7 +66,12 @@ async fn run_inner(args: &[String]) -> Result<(), String> {
 
     let listener = QuicListener::from_socket(std_socket)?;
 
+    // Immediate burst to create NAT mapping before accept
     println!("punching through NAT...");
+    for _ in 0..PUNCH_BURST {
+        let _ = punch_clone.send_to(&[0u8], receiver_addr);
+    }
+
     let punch_task = nat::punch_background(punch_clone, receiver_addr)?;
 
     let mut stream = tokio::time::timeout(ACCEPT_TIMEOUT, listener.accept())
