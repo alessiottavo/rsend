@@ -2,14 +2,26 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-const STUN_SERVER: &str = "stun.l.google.com:19302";
+const STUN_SERVER_1: &str = "stun.l.google.com:19302";
+const STUN_SERVER_2: &str = "stun1.l.google.com:19302";
+
+/// Detected NAT type based on port mapping consistency across STUN servers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NatType {
+    /// Same external port for different destinations — hole-punching works.
+    Cone,
+    /// Different external port per destination — hole-punching will likely fail.
+    Symmetric,
+}
 
 /// Bind a UDP socket and discover our public address via STUN.
 ///
-/// Internally: binds a `std::net::UdpSocket`, clones the FD for STUN discovery
-/// via `async_std` (required by `stun_client`), then wraps the original in tokio.
-/// The NAT mapping created by STUN applies to both FDs (same underlying socket).
-pub async fn bind_and_discover() -> Result<(tokio::net::UdpSocket, SocketAddr), String> {
+/// Queries two STUN servers on the same socket to detect NAT type:
+/// - If both return the same port → `Cone` (hole-punch friendly)
+/// - If ports differ → `Symmetric` (CGNAT, hole-punch won't work)
+///
+/// Falls back to `Cone` if the second STUN query fails.
+pub async fn bind_and_discover() -> Result<(tokio::net::UdpSocket, SocketAddr, NatType), String> {
     let std_socket =
         std::net::UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("bind UDP: {e}"))?;
     std_socket
@@ -20,10 +32,8 @@ pub async fn bind_and_discover() -> Result<(tokio::net::UdpSocket, SocketAddr), 
         .try_clone()
         .map_err(|e| format!("clone socket for STUN: {e}"))?;
 
-    let public_addr = tokio::task::spawn_blocking(move || {
-        // stun_client is async_std-based, so run it inside async_std's runtime
+    let (public_addr, nat_type) = tokio::task::spawn_blocking(move || {
         async_std::task::block_on(async {
-            // async_std needs a blocking socket to be converted
             stun_clone
                 .set_nonblocking(false)
                 .map_err(|e| format!("set blocking for STUN: {e}"))?;
@@ -32,13 +42,28 @@ pub async fn bind_and_discover() -> Result<(tokio::net::UdpSocket, SocketAddr), 
             let mut client =
                 stun_client::Client::from_socket(Arc::new(async_socket), None);
 
-            let msg = client
-                .binding_request(STUN_SERVER, None)
+            // First STUN query — required for public address
+            let msg1 = client
+                .binding_request(STUN_SERVER_1, None)
                 .await
                 .map_err(|e| format!("STUN binding request failed: {e}"))?;
 
-            stun_client::Attribute::get_xor_mapped_address(&msg)
-                .ok_or_else(|| "STUN response missing XOR-MAPPED-ADDRESS".to_string())
+            let addr1 = stun_client::Attribute::get_xor_mapped_address(&msg1)
+                .ok_or_else(|| "STUN response missing XOR-MAPPED-ADDRESS".to_string())?;
+
+            // Second STUN query — for NAT type detection
+            let nat_type = match client.binding_request(STUN_SERVER_2, None).await {
+                Ok(msg2) => {
+                    match stun_client::Attribute::get_xor_mapped_address(&msg2) {
+                        Some(addr2) if addr1.port() == addr2.port() => NatType::Cone,
+                        Some(_) => NatType::Symmetric,
+                        None => NatType::Cone, // missing attribute — optimistic
+                    }
+                }
+                Err(_) => NatType::Cone, // second query failed — optimistic
+            };
+
+            Ok::<_, String>((addr1, nat_type))
         })
     })
     .await
@@ -47,7 +72,7 @@ pub async fn bind_and_discover() -> Result<(tokio::net::UdpSocket, SocketAddr), 
     let tokio_socket = tokio::net::UdpSocket::from_std(std_socket)
         .map_err(|e| format!("wrap socket in tokio: {e}"))?;
 
-    Ok((tokio_socket, public_addr))
+    Ok((tokio_socket, public_addr, nat_type))
 }
 
 /// Spawn a background task that continuously punches toward `peer`.
@@ -185,10 +210,12 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires internet access"]
     async fn test_bind_and_discover_returns_public_addr() {
-        let (_socket, addr) = bind_and_discover().await.unwrap();
+        let (_socket, addr, nat_type) = bind_and_discover().await.unwrap();
         // Public address should not be unspecified or loopback
         assert!(!addr.ip().is_unspecified());
         assert!(!addr.ip().is_loopback());
         assert_ne!(addr.port(), 0);
+        // NAT type should be one of the two variants
+        assert!(nat_type == NatType::Cone || nat_type == NatType::Symmetric);
     }
 }

@@ -1,8 +1,9 @@
 use std::sync::Arc;
+use std::time::Duration;
 use std::{net::SocketAddr, net::UdpSocket};
 
 use quinn::{
-    ClientConfig, Endpoint, EndpointConfig, RecvStream, SendStream, ServerConfig,
+    ClientConfig, Endpoint, EndpointConfig, RecvStream, SendStream, ServerConfig, TransportConfig,
     crypto::rustls::{QuicClientConfig, QuicServerConfig},
 };
 use rcgen::{CertifiedKey, generate_simple_self_signed};
@@ -95,7 +96,56 @@ pub async fn connect(udp: UdpSocket, peer_addr: SocketAddr) -> Result<QuicStream
     })
 }
 
+/// Connect to a peer with multiple attempts, giving NAT hole-punch time to open mappings.
+///
+/// Each attempt clones the socket (same local port, same NAT mapping) and runs
+/// `connect()` with the given per-attempt timeout. Returns on first success or
+/// the error from the final attempt.
+pub async fn connect_with_retry(
+    udp: &UdpSocket,
+    peer_addr: SocketAddr,
+    attempts: u32,
+    per_attempt: Duration,
+) -> Result<QuicStream, String> {
+    let mut last_err = String::from("no attempts made");
+
+    for attempt in 1..=attempts {
+        let socket_clone = udp
+            .try_clone()
+            .map_err(|e| format!("clone socket for attempt {attempt}: {e}"))?;
+
+        if attempt > 1 {
+            eprintln!("retrying QUIC handshake (attempt {attempt}/{attempts})...");
+        }
+
+        match tokio::time::timeout(per_attempt, connect(socket_clone, peer_addr)).await {
+            Ok(Ok(stream)) => return Ok(stream),
+            Ok(Err(e)) => {
+                last_err = e;
+                eprintln!("attempt {attempt}/{attempts} failed: {last_err}");
+            }
+            Err(_) => {
+                last_err = format!("attempt {attempt}/{attempts} timed out after {per_attempt:?}");
+                eprintln!("{last_err}");
+            }
+        }
+    }
+
+    Err(last_err)
+}
+
 // --- TLS config helpers ---
+
+fn make_transport_config() -> TransportConfig {
+    let mut config = TransportConfig::default();
+    config.keep_alive_interval(Some(Duration::from_secs(5)));
+    config.max_idle_timeout(Some(
+        Duration::from_secs(30)
+            .try_into()
+            .expect("30s fits in IdleTimeout"),
+    ));
+    config
+}
 
 fn make_server_config() -> Result<ServerConfig, String> {
     let (cert_der, key_der) = generate_cert()?;
@@ -105,11 +155,12 @@ fn make_server_config() -> Result<ServerConfig, String> {
         .with_single_cert(vec![cert_der], key_der)
         .map_err(|e| format!("TLS server config error: {e}"))?;
 
-    ServerConfig::with_crypto(Arc::new(
+    let mut cfg = ServerConfig::with_crypto(Arc::new(
         QuicServerConfig::try_from(server_crypto)
             .map_err(|e| format!("QUIC server config error: {e}"))?,
-    ))
-    .pipe(Ok)
+    ));
+    cfg.transport_config(Arc::new(make_transport_config()));
+    Ok(cfg)
 }
 
 fn make_client_config() -> Result<ClientConfig, String> {
@@ -118,11 +169,12 @@ fn make_client_config() -> Result<ClientConfig, String> {
         .with_custom_certificate_verifier(Arc::new(NoVerifier))
         .with_no_client_auth();
 
-    ClientConfig::new(Arc::new(
+    let mut cfg = ClientConfig::new(Arc::new(
         QuicClientConfig::try_from(client_crypto)
             .map_err(|e| format!("QUIC client config error: {e}"))?,
-    ))
-    .pipe(Ok)
+    ));
+    cfg.transport_config(Arc::new(make_transport_config()));
+    Ok(cfg)
 }
 
 fn generate_cert() -> Result<(CertificateDer<'static>, PrivateKeyDer<'static>), String> {
@@ -134,18 +186,6 @@ fn generate_cert() -> Result<(CertificateDer<'static>, PrivateKeyDer<'static>), 
 
     Ok((cert_der, key_der))
 }
-
-/// Pipe helper — allows `expr.pipe(Ok)` to wrap in Result without nesting.
-trait Pipe: Sized {
-    fn pipe<F, R>(self, f: F) -> R
-    where
-        F: FnOnce(Self) -> R,
-    {
-        f(self)
-    }
-}
-
-impl<T> Pipe for T {}
 
 /// No-op TLS verifier — pairing code is the trust anchor, not the cert chain.
 #[derive(Debug)]

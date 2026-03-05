@@ -7,10 +7,10 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-const HOLE_PUNCH_PACKETS: u32 = 10;
-const HOLE_PUNCH_INTERVAL: Duration = Duration::from_millis(50);
 const SENDER_LOOKUP_ATTEMPTS: u32 = 30;
 const SENDER_LOOKUP_DELAY: Duration = Duration::from_secs(2);
+const CONNECT_ATTEMPTS: u32 = 3;
+const CONNECT_PER_ATTEMPT: Duration = Duration::from_secs(15);
 
 pub async fn run(args: &[String]) {
     if let Err(e) = run_inner(args).await {
@@ -35,8 +35,12 @@ async fn run_inner(args: &[String]) -> Result<(), String> {
 
     // Bind UDP + STUN discovery
     println!("discovering public address...");
-    let (udp, public_addr) = nat::bind_and_discover().await?;
+    let (udp, public_addr, nat_type) = nat::bind_and_discover().await?;
     println!("public address: {public_addr}");
+
+    if nat_type == nat::NatType::Symmetric {
+        eprintln!("warning: symmetric NAT detected — direct connection may fail");
+    }
 
     // Lookup sender on DHT
     println!("looking up sender...");
@@ -46,11 +50,7 @@ async fn run_inner(args: &[String]) -> Result<(), String> {
     // Announce receiver on DHT so sender can find us
     dht::announce(&receiver_key, public_addr.port()).await?;
 
-    // Hole-punch toward sender
-    println!("punching through NAT...");
-    nat::punch_hole(&udp, sender_addr, HOLE_PUNCH_PACKETS, HOLE_PUNCH_INTERVAL).await?;
-
-    // Convert tokio socket back to std, clone for background punching
+    // Convert to std socket, start background punch concurrently with connect
     let std_socket = udp
         .into_std()
         .map_err(|e| format!("convert to std socket: {e}"))?;
@@ -61,10 +61,14 @@ async fn run_inner(args: &[String]) -> Result<(), String> {
     let punch_clone = std_socket
         .try_clone()
         .map_err(|e| format!("clone socket for punch: {e}"))?;
+
+    println!("punching through NAT...");
     let punch_task = nat::punch_background(punch_clone, sender_addr)?;
 
     println!("connecting...");
-    let mut stream = quic::connect(std_socket, sender_addr).await?;
+    let mut stream =
+        quic::connect_with_retry(&std_socket, sender_addr, CONNECT_ATTEMPTS, CONNECT_PER_ATTEMPT)
+            .await?;
     punch_task.abort();
 
     // Handshake: exchange aliases

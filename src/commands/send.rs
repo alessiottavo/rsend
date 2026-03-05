@@ -6,10 +6,9 @@ use crate::transport::{dht, nat, quic::QuicListener};
 use std::path::PathBuf;
 use std::time::Duration;
 
-const HOLE_PUNCH_PACKETS: u32 = 10;
-const HOLE_PUNCH_INTERVAL: Duration = Duration::from_millis(50);
 const RECEIVER_LOOKUP_ATTEMPTS: u32 = 60;
 const RECEIVER_LOOKUP_DELAY: Duration = Duration::from_secs(2);
+const ACCEPT_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub async fn run(args: &[String]) {
     if let Err(e) = run_inner(args).await {
@@ -36,8 +35,12 @@ async fn run_inner(args: &[String]) -> Result<(), String> {
 
     // Bind UDP + STUN discovery
     println!("discovering public address...");
-    let (udp, public_addr) = nat::bind_and_discover().await?;
+    let (udp, public_addr, nat_type) = nat::bind_and_discover().await?;
     println!("public address: {public_addr}");
+
+    if nat_type == nat::NatType::Symmetric {
+        eprintln!("warning: symmetric NAT detected — direct connection may fail");
+    }
 
     // Announce sender on DHT with STUN-discovered port
     dht::announce(&sender_key, public_addr.port()).await?;
@@ -48,11 +51,7 @@ async fn run_inner(args: &[String]) -> Result<(), String> {
         dht::lookup_with_retry(&receiver_key, RECEIVER_LOOKUP_ATTEMPTS, RECEIVER_LOOKUP_DELAY)
             .await?;
 
-    // Hole-punch toward receiver
-    println!("punching through NAT...");
-    nat::punch_hole(&udp, receiver_addr, HOLE_PUNCH_PACKETS, HOLE_PUNCH_INTERVAL).await?;
-
-    // Convert tokio socket back to std, clone for background punching
+    // Convert to std socket, create listener FIRST, then start background punch
     let std_socket = udp
         .into_std()
         .map_err(|e| format!("convert to std socket: {e}"))?;
@@ -63,10 +62,16 @@ async fn run_inner(args: &[String]) -> Result<(), String> {
     let punch_clone = std_socket
         .try_clone()
         .map_err(|e| format!("clone socket for punch: {e}"))?;
-    let punch_task = nat::punch_background(punch_clone, receiver_addr)?;
 
     let listener = QuicListener::from_socket(std_socket)?;
-    let mut stream = listener.accept().await?;
+
+    println!("punching through NAT...");
+    let punch_task = nat::punch_background(punch_clone, receiver_addr)?;
+
+    let mut stream = tokio::time::timeout(ACCEPT_TIMEOUT, listener.accept())
+        .await
+        .map_err(|_| format!("accept timed out after {ACCEPT_TIMEOUT:?}"))?
+        .map_err(|e| format!("{e}"))?;
     punch_task.abort();
 
     // Handshake: exchange aliases
