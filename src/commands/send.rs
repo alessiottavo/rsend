@@ -1,28 +1,44 @@
+use crate::crypto::hash;
 use crate::pairing::{alias, code::PairingCode};
+use crate::transfer;
+use crate::transport::{dht, quic::QuicListener};
 use std::path::PathBuf;
 
-#[allow(clippy::unused_async)] // will contain awaits when sender flow is wired
 pub async fn run(args: &[String]) {
-    match validate_args(args) {
-        Ok(_send_path) => {
-            let sender_alias = alias::generate();
-            let pairing_code = match PairingCode::generate() {
-                Ok(code) => code,
-                Err(e) => {
-                    eprintln!("error: {e}");
-                    std::process::exit(1);
-                }
-            };
-
-            println!("your alias:   {sender_alias}");
-            println!("pairing code: {}", pairing_code.value);
-            println!("waiting to pair...");
-        }
-        Err(e) => {
-            eprintln!("error: {e}");
-            std::process::exit(1);
-        }
+    if let Err(e) = run_inner(args).await {
+        eprintln!("error: {e}");
+        std::process::exit(1);
     }
+}
+
+async fn run_inner(args: &[String]) -> Result<(), String> {
+    let send_path = validate_args(args)?;
+
+    if !send_path.exists() {
+        return Err(format!("'{}' does not exist", send_path.display()));
+    }
+
+    let sender_alias = alias::generate();
+    let pairing_code = PairingCode::generate()?;
+
+    println!("your alias:   {sender_alias}");
+    println!("pairing code: {}", pairing_code.value);
+
+    let dht_key = hash::derive_dht_key(&pairing_code.value);
+
+    let listener = QuicListener::bind(0)?;
+    let port = listener.port()?;
+
+    dht::announce(&dht_key, port)?;
+
+    println!("waiting to pair...");
+
+    let mut stream = listener.accept().await?;
+    let files = transfer::collect_files(&send_path)?;
+    transfer::send_files(&mut stream, files, |_| {}).await?;
+
+    println!("done!");
+    Ok(())
 }
 
 fn validate_args(args: &[String]) -> Result<PathBuf, String> {
